@@ -169,6 +169,37 @@ impl Extractor {
         }
     }
 
+    /// Execute the extractor and return a sequence of literals.
+    pub fn extract(&self, hir: &Hir) -> Seq {
+        use crate::hir::HirKind::*;
+
+        match *hir.kind() {
+            Empty | Look(_) => Seq::singleton(self::Literal::exact(vec![])),
+            Literal(hir::Literal(ref bytes)) => {
+                let mut seq =
+                    Seq::singleton(self::Literal::exact(bytes.to_vec()));
+                self.enforce_literal_len(&mut seq);
+                seq
+            }
+            Class(hir::Class::Unicode(ref cls)) => {
+                self.extract_class_unicode(cls)
+            }
+            Class(hir::Class::Bytes(ref cls)) => self.extract_class_bytes(cls),
+            Repetition(ref rep) => self.extract_repetition(rep),
+            Group(hir::Group { ref hir, .. }) => self.extract(hir),
+            Concat(ref hirs) => match self.kind {
+                ExtractKind::Prefix => self.extract_concat(hirs.iter()),
+                ExtractKind::Suffix => self.extract_concat(hirs.iter().rev()),
+            },
+            Alternation(ref hirs) => {
+                // Unlike concat, we always union starting from the beginning,
+                // since the beginning corresponds to the highest preference,
+                // which doesn't change based on forwards vs reverse.
+                self.extract_alternation(hirs.iter())
+            }
+        }
+    }
+
     /// Set the kind of literal sequence to extract from an [`Hir`] expression.
     ///
     /// The default is to extract prefixes, but suffixes can be selected
@@ -211,7 +242,7 @@ impl Extractor {
     /// let hir = Parser::new().parse(r"[0-9]")?;
     ///
     /// let got = Extractor::new().extract(&hir);
-    /// let expected = Seq::from_iter([
+    /// let expected = Seq::new([
     ///     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     /// ]);
     /// assert_eq!(expected, got);
@@ -248,7 +279,7 @@ impl Extractor {
     /// let hir = Parser::new().parse(r"(abc){8}")?;
     ///
     /// let got = Extractor::new().extract(&hir);
-    /// let expected = Seq::from_iter(["abcabcabcabcabcabcabcabc"]);
+    /// let expected = Seq::new(["abcabcabcabcabcabcabcabc"]);
     /// assert_eq!(expected, got);
     ///
     /// // Now let's shrink the limit and see how that changes things.
@@ -285,7 +316,7 @@ impl Extractor {
     /// let hir = Parser::new().parse(r"(abc){2}{2}{2}")?;
     ///
     /// let got = Extractor::new().extract(&hir);
-    /// let expected = Seq::from_iter(["abcabcabcabcabcabcabcabc"]);
+    /// let expected = Seq::new(["abcabcabcabcabcabcabcabc"]);
     /// assert_eq!(expected, got);
     ///
     /// // Now let's shrink the limit and see how that changes things.
@@ -327,7 +358,7 @@ impl Extractor {
     /// let hir = Parser::new().parse(r"[ab]{2}{2}")?;
     ///
     /// let got = Extractor::new().extract(&hir);
-    /// let expected = Seq::from_iter([
+    /// let expected = Seq::new([
     ///     "aaaa", "aaab", "aaba", "aabb",
     ///     "abaa", "abab", "abba", "abbb",
     ///     "baaa", "baab", "baba", "babb",
@@ -356,37 +387,6 @@ impl Extractor {
     pub fn limit_total(&mut self, limit: usize) -> &mut Extractor {
         self.limit_total = limit;
         self
-    }
-
-    /// Execute the extractor and return a sequence of literals.
-    pub fn extract(&self, hir: &Hir) -> Seq {
-        use crate::hir::HirKind::*;
-
-        match *hir.kind() {
-            Empty | Look(_) => Seq::singleton(self::Literal::exact(vec![])),
-            Literal(hir::Literal(ref bytes)) => {
-                let mut seq =
-                    Seq::singleton(self::Literal::exact(bytes.to_vec()));
-                self.enforce_literal_len(&mut seq);
-                seq
-            }
-            Class(hir::Class::Unicode(ref cls)) => {
-                self.extract_class_unicode(cls)
-            }
-            Class(hir::Class::Bytes(ref cls)) => self.extract_class_bytes(cls),
-            Repetition(ref rep) => self.extract_repetition(rep),
-            Group(hir::Group { ref hir, .. }) => self.extract(hir),
-            Concat(ref hirs) => match self.kind {
-                ExtractKind::Prefix => self.extract_concat(hirs.iter()),
-                ExtractKind::Suffix => self.extract_concat(hirs.iter().rev()),
-            },
-            Alternation(ref hirs) => {
-                // Unlike concat, we always union starting from the beginning,
-                // since the beginning corresponds to the highest preference,
-                // which doesn't change based on forwards vs reverse.
-                self.extract_alternation(hirs.iter())
-            }
-        }
     }
 
     /// Extract a sequence from the given concatenation. Sequences from each of
@@ -668,7 +668,7 @@ impl ExtractKind {
 /// ```
 /// use regex_syntax::hir::literal::{Literal, Seq};
 ///
-/// let mut seq = Seq::from_iter(&[
+/// let mut seq = Seq::new(&[
 ///     "farm",
 ///     "appliance",
 ///     "faraway",
@@ -719,6 +719,16 @@ impl Seq {
     #[inline]
     pub fn singleton(lit: Literal) -> Seq {
         Seq { literals: Some(vec![lit]) }
+    }
+
+    /// Returns a sequence of exact literals from the given byte strings.
+    #[inline]
+    pub fn new<I, B>(it: I) -> Seq
+    where
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        it.into_iter().map(|b| Literal::exact(b.as_ref())).collect()
     }
 
     /// Returns a sequence of literals without a finite size and may contain
@@ -1138,15 +1148,15 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let mut seq1 = Seq::from_iter(&["foo", "bar"]);
-    /// let mut seq2 = Seq::from_iter(&["bar", "quux", "foo"]);
+    /// let mut seq1 = Seq::new(&["foo", "bar"]);
+    /// let mut seq2 = Seq::new(&["bar", "quux", "foo"]);
     /// seq1.union(&mut seq2);
     ///
     /// // The literals are pulled out of seq2.
     /// assert_eq!(Some(0), seq2.len());
     ///
     /// // Adjacent literals are deduped, but non-adjacent literals may not be.
-    /// assert_eq!(Seq::from_iter(&["foo", "bar", "quux", "foo"]), seq1);
+    /// assert_eq!(Seq::new(&["foo", "bar", "quux", "foo"]), seq1);
     /// ```
     ///
     /// This example shows that literals are drained from `other` even when
@@ -1159,7 +1169,7 @@ impl Seq {
     /// // Infinite sequences have no finite length.
     /// assert_eq!(None, seq1.len());
     ///
-    /// let mut seq2 = Seq::from_iter(&["bar", "quux", "foo"]);
+    /// let mut seq2 = Seq::new(&["bar", "quux", "foo"]);
     /// seq1.union(&mut seq2);
     ///
     /// // seq1 is still infinite and seq2 has been drained.
@@ -1209,14 +1219,14 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let mut seq1 = Seq::from_iter(&["a", "", "f", ""]);
-    /// let mut seq2 = Seq::from_iter(&["foo"]);
+    /// let mut seq1 = Seq::new(&["a", "", "f", ""]);
+    /// let mut seq2 = Seq::new(&["foo"]);
     /// seq1.union_into_empty(&mut seq2);
     ///
     /// // The literals are pulled out of seq2.
     /// assert_eq!(Some(0), seq2.len());
     /// // 'foo' gets spliced into seq1 where the first empty string occurs.
-    /// assert_eq!(Seq::from_iter(&["a", "foo", "f"]), seq1);
+    /// assert_eq!(Seq::new(&["a", "foo", "f"]), seq1);
     /// ```
     ///
     /// This example shows that literals are drained from `other` even when
@@ -1225,12 +1235,12 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let mut seq1 = Seq::from_iter(&["foo", "bar"]);
-    /// let mut seq2 = Seq::from_iter(&["bar", "quux", "foo"]);
+    /// let mut seq1 = Seq::new(&["foo", "bar"]);
+    /// let mut seq2 = Seq::new(&["bar", "quux", "foo"]);
     /// seq1.union_into_empty(&mut seq2);
     ///
     /// // seq1 has no zero length literals, so no splicing happens.
-    /// assert_eq!(Seq::from_iter(&["foo", "bar"]), seq1);
+    /// assert_eq!(Seq::new(&["foo", "bar"]), seq1);
     /// // Even though no splicing happens, seq2 is still drained.
     /// assert_eq!(Some(0), seq2.len());
     /// ```
@@ -1320,10 +1330,10 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let mut seq = Seq::from_iter(&["foo", "quux", "bar"]);
+    /// let mut seq = Seq::new(&["foo", "quux", "bar"]);
     /// seq.sort();
     ///
-    /// assert_eq!(Seq::from_iter(&["bar", "foo", "quux"]), seq);
+    /// assert_eq!(Seq::new(&["bar", "foo", "quux"]), seq);
     /// ```
     #[inline]
     pub fn sort(&mut self) {
@@ -1343,9 +1353,9 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let mut seq = Seq::from_iter(&["oof", "rab"]);
+    /// let mut seq = Seq::new(&["oof", "rab"]);
     /// seq.reverse_literals();
-    /// assert_eq!(Seq::from_iter(&["foo", "bar"]), seq);
+    /// assert_eq!(Seq::new(&["foo", "bar"]), seq);
     /// ```
     #[inline]
     pub fn reverse_literals(&mut self) {
@@ -1376,15 +1386,15 @@ impl Seq {
     ///
     /// // If 'sam' comes before 'samwise' and a preference order search is
     /// // executed, then 'samwise' can never match.
-    /// let mut seq = Seq::from_iter(&["sam", "samwise"]);
+    /// let mut seq = Seq::new(&["sam", "samwise"]);
     /// seq.minimize_by_preference();
     /// assert_eq!(Seq::from_iter([Literal::inexact("sam")]), seq);
     ///
     /// // But if they are reversed, then it's possible for 'samwise' to match
     /// // since it is given higher preference.
-    /// let mut seq = Seq::from_iter(&["samwise", "sam"]);
+    /// let mut seq = Seq::new(&["samwise", "sam"]);
     /// seq.minimize_by_preference();
-    /// assert_eq!(Seq::from_iter(&["samwise", "sam"]), seq);
+    /// assert_eq!(Seq::new(&["samwise", "sam"]), seq);
     /// ```
     ///
     /// This example shows that if an empty string is in this seq, then
@@ -1395,7 +1405,7 @@ impl Seq {
     ///
     /// // An empty string is a prefix of all strings, so it automatically
     /// // inhibits any subsequent strings from matching.
-    /// let mut seq = Seq::from_iter(&["foo", "bar", "", "quux", "fox"]);
+    /// let mut seq = Seq::new(&["foo", "bar", "", "quux", "fox"]);
     /// seq.minimize_by_preference();
     /// let expected = Seq::from_iter([
     ///     Literal::exact("foo"),
@@ -1406,7 +1416,7 @@ impl Seq {
     ///
     /// // And of course, if it's at the beginning, then it makes it impossible
     /// // for anything else to match.
-    /// let mut seq = Seq::from_iter(&["", "foo", "quux", "fox"]);
+    /// let mut seq = Seq::new(&["", "foo", "quux", "fox"]);
     /// seq.minimize_by_preference();
     /// assert_eq!(Seq::from_iter([Literal::inexact("")]), seq);
     /// ```
@@ -1426,7 +1436,7 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::{Literal, Seq};
     ///
-    /// let mut seq = Seq::from_iter(&["a", "foo", "quux"]);
+    /// let mut seq = Seq::new(&["a", "foo", "quux"]);
     /// seq.keep_first_bytes(2);
     ///
     /// let expected = Seq::from_iter([
@@ -1454,7 +1464,7 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::{Literal, Seq};
     ///
-    /// let mut seq = Seq::from_iter(&["a", "foo", "quux"]);
+    /// let mut seq = Seq::new(&["a", "foo", "quux"]);
     /// seq.keep_last_bytes(2);
     ///
     /// let expected = Seq::from_iter([
@@ -1562,13 +1572,13 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let seq = Seq::from_iter(&["foo", "foobar", "fo"]);
+    /// let seq = Seq::new(&["foo", "foobar", "fo"]);
     /// assert_eq!(Some(&b"fo"[..]), seq.longest_common_prefix());
-    /// let seq = Seq::from_iter(&["foo", "foo"]);
+    /// let seq = Seq::new(&["foo", "foo"]);
     /// assert_eq!(Some(&b"foo"[..]), seq.longest_common_prefix());
-    /// let seq = Seq::from_iter(&["foo", "bar"]);
+    /// let seq = Seq::new(&["foo", "bar"]);
     /// assert_eq!(Some(&b""[..]), seq.longest_common_prefix());
-    /// let seq = Seq::from_iter(&[""]);
+    /// let seq = Seq::new(&[""]);
     /// assert_eq!(Some(&b""[..]), seq.longest_common_prefix());
     ///
     /// let seq = Seq::infinite();
@@ -1615,13 +1625,13 @@ impl Seq {
     /// ```
     /// use regex_syntax::hir::literal::Seq;
     ///
-    /// let seq = Seq::from_iter(&["oof", "raboof", "of"]);
+    /// let seq = Seq::new(&["oof", "raboof", "of"]);
     /// assert_eq!(Some(&b"of"[..]), seq.longest_common_suffix());
-    /// let seq = Seq::from_iter(&["foo", "foo"]);
+    /// let seq = Seq::new(&["foo", "foo"]);
     /// assert_eq!(Some(&b"foo"[..]), seq.longest_common_suffix());
-    /// let seq = Seq::from_iter(&["foo", "bar"]);
+    /// let seq = Seq::new(&["foo", "bar"]);
     /// assert_eq!(Some(&b""[..]), seq.longest_common_suffix());
-    /// let seq = Seq::from_iter(&[""]);
+    /// let seq = Seq::new(&[""]);
     /// assert_eq!(Some(&b""[..]), seq.longest_common_suffix());
     ///
     /// let seq = Seq::infinite();
@@ -1656,6 +1666,115 @@ impl Seq {
         }
         Some(&base[base.len() - len..])
     }
+
+    /// TODO
+    #[inline]
+    pub fn optimize_for_prefix(&mut self) {
+        self.optimize(true);
+    }
+
+    /// TODO
+    #[inline]
+    pub fn optimize_for_suffix(&mut self) {
+        self.optimize(false);
+    }
+
+    fn optimize(&mut self, prefix: bool) {
+        const ATTEMPTS: [(usize, usize); 3] = [(5, 40), (4, 30), (3, 20)];
+
+        // Make sure we start with the smallest sequence possible.
+        self.minimize_by_preference();
+
+        // Look for a common prefix (or suffix). If we found one of those and
+        // it's long enough, then it's a good bet that it will be our fastest
+        // possible prefilter since single-substring search is so fast.
+        let fix = if prefix {
+            self.longest_common_prefix()
+        } else {
+            self.longest_common_suffix()
+        };
+        if let Some(fixlen) = fix.map(|x| x.len()) {
+            // If the prefix is particularly short, then we assume it is
+            // probably not particularly discriminatory, and might make for a
+            // worse prefilter than searching for more literals.
+            if fixlen > 1 {
+                // If we keep exactly the number of bytes equal to the length
+                // of the prefix (or suffix), then by the definition of a
+                // prefix, every literal in the sequence will be equivalent.
+                // Thus, 'dedup' will leave us with one literal.
+                //
+                // We do it this way to avoid an alloc, but also to make sure
+                // the exactness of literals is kept (or not).
+                if prefix {
+                    self.keep_first_bytes(fixlen);
+                } else {
+                    self.keep_last_bytes(fixlen);
+                }
+                self.dedup();
+                assert_eq!(Some(1), self.len());
+                // We still fall through here. In particular, we want our
+                // longest common prefix to be subject to the poison check.
+            }
+        }
+        // Everything below this check is more-or-less about trying to
+        // heuristically reduce the false positive rate of a prefilter. But
+        // if our sequence is completely exact, then it's possible the regex
+        // engine can be skipped entirely. In this case, the false positive
+        // rate is zero because every literal match corresponds to a regex
+        // match.
+        //
+        // This is OK even if the sequence contains a poison literal. Remember,
+        // a literal is only poisononous because of what we assume about its
+        // impact on the false positive rate. However, we do still check for
+        // an empty string. Empty strings are weird and it's best to let the
+        // regex engine handle those.
+        //
+        // We do currently do this check after the longest common prefix (or
+        // suffix) check, under the theory that single-substring search is so
+        // fast that we want that even if we'd end up turning an exact sequence
+        // into an inexact one. But this might be wrong...
+        if self.is_exact()
+            && self.min_literal_len().map_or(false, |len| len > 0)
+        {
+            return;
+        }
+        // Now we attempt to shorten the sequence. The idea here is that we
+        // don't want to look for too many literals. But we don't attempt to
+        // shorten the sequences to one per literal---we stop at 3---because
+        // we want our literals to be at least a little long themselves.
+        // Otherwise, we risk them being indiscriminatory and leading to too
+        // many false positives.
+        for (keep, limit) in ATTEMPTS {
+            let len = match self.len() {
+                None => break,
+                Some(len) => len,
+            };
+            if len <= limit {
+                break;
+            }
+            if prefix {
+                self.keep_first_bytes(keep);
+            } else {
+                self.keep_last_bytes(keep);
+            }
+            self.minimize_by_preference();
+        }
+        // Check for a poison literal. A poison literal is one that is short
+        // and is believed to have a very high match count. These poisons
+        // generally lead to a prefilter with a very high false positive rate,
+        // and thus overall worse performance.
+        //
+        // We do this last because we could have gone from a non-poisonous
+        // sequence to a poisonous one. Perhaps we should add some code to
+        // prevent such transitions in the first place, but then again, we
+        // likely only made the transition in the first place if the sequence
+        // was itself huge. And huge sequences are themselves poisonous. So...
+        if let Some(lits) = self.literals() {
+            if lits.iter().any(|lit| lit.is_poisonous()) {
+                self.make_infinite();
+            }
+        }
+    }
 }
 
 impl FromIterator<Literal> for Seq {
@@ -1668,16 +1787,16 @@ impl FromIterator<Literal> for Seq {
     }
 }
 
-/// Creates a sequence of exact literals from an iterator of byte strings.
-impl<B: AsRef<[u8]>> FromIterator<B> for Seq {
-    fn from_iter<T: IntoIterator<Item = B>>(it: T) -> Seq {
-        let mut seq = Seq::empty();
-        for literal in it {
-            seq.push(Literal::exact(literal.as_ref()));
-        }
-        seq
-    }
-}
+// /// Creates a sequence of exact literals from an iterator of byte strings.
+// impl<B: AsRef<[u8]>> FromIterator<B> for Seq {
+// fn from_iter<T: IntoIterator<Item = B>>(it: T) -> Seq {
+// let mut seq = Seq::empty();
+// for literal in it {
+// seq.push(Literal::exact(literal.as_ref()));
+// }
+// seq
+// }
+// }
 
 /// A single literal extracted from an [`Hir`] expression.
 ///
@@ -1793,6 +1912,12 @@ impl Literal {
         self.make_inexact();
         self.bytes.drain(..self.len() - len);
     }
+
+    /// Returns true if it is believe that this literal is likely to match very
+    /// frequently, and is thus not a good candidate for a prefilter.
+    fn is_poisonous(&self) -> bool {
+        self.is_empty() || (self.len() == 1 && rank(self.as_bytes()[0]) >= 250)
+    }
 }
 
 impl From<u8> for Literal {
@@ -1805,6 +1930,12 @@ impl From<char> for Literal {
     fn from(ch: char) -> Literal {
         use alloc::string::ToString;
         Literal::exact(ch.encode_utf8(&mut [0; 4]).to_string())
+    }
+}
+
+impl AsRef<[u8]> for Literal {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
     }
 }
 
@@ -1930,6 +2061,17 @@ impl PreferenceTrie {
     }
 }
 
+/// Returns the "rank" of the given byte.
+///
+/// The minimum rank value is `0` and the maximum rank value is `255`.
+///
+/// The rank of a byte is derived from a heuristic background distribution of
+/// relative frequencies of bytes. The heuristic says that lower the rank of a
+/// byte, the less likely that byte is to appear in any arbitrary haystack.
+pub fn rank(byte: u8) -> u8 {
+    crate::rank::BYTE_FREQUENCIES[usize::from(byte)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1981,9 +2123,16 @@ mod tests {
     }
 
     fn exact<B: AsRef<[u8]>, I: IntoIterator<Item = B>>(it: I) -> (Seq, Seq) {
-        let s1 = Seq::from_iter(it);
+        let s1 = Seq::new(it);
         let s2 = s1.clone();
         (s1, s2)
+    }
+
+    fn opt<B: AsRef<[u8]>, I: IntoIterator<Item = B>>(it: I) -> (Seq, Seq) {
+        let (mut p, mut s) = exact(it);
+        p.optimize_for_prefix();
+        s.optimize_for_suffix();
+        (p, s)
     }
 
     #[test]
@@ -2749,5 +2898,28 @@ mod tests {
         let (prefixes, suffixes) = e(pat);
         assert!(!suffixes.is_finite());
         assert_eq!(Some(247), prefixes.len());
+    }
+
+    #[test]
+    fn optimize() {
+        // This gets a common prefix that isn't too short.
+        let (p, s) = opt(["foobarfoo", "foo", "foozfoo", "foofoo"]);
+        assert_eq!(seq([I("foo")]), p);
+        assert_eq!(seq([I("foo")]), s);
+
+        // This also finds a common prefix, but since it's only one byte, it
+        // prefers the multiple literals.
+        let (p, s) = opt(["abba", "akka", "abccba"]);
+        assert_eq!(exact(["abba", "akka", "abccba"]), (p, s));
+
+        // The empty string is poisonous, so our seq becomes infinite.
+        let (p, s) = opt(["foobarfoo", "foo", "", "foozfoo", "foofoo"]);
+        assert!(!p.is_finite());
+        assert!(!s.is_finite());
+
+        // A space is also poisonous, so our seq becomes infinite.
+        let (p, s) = opt(["foobarfoo", "foo", " ", "foozfoo", "foofoo"]);
+        assert!(!p.is_finite());
+        assert!(!s.is_finite());
     }
 }
